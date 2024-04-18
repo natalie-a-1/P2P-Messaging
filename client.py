@@ -1,38 +1,80 @@
 import sys
+import ssl
 import socket
 import threading
 from PyQt5.QtWidgets import QApplication, QMainWindow, QTextEdit, QPushButton, QVBoxLayout, QWidget, QComboBox, QLabel, QHBoxLayout
 from PyQt5.QtCore import pyqtSignal, QObject, Qt, QEvent
+from Crypto.Cipher import AES
+from Crypto.Protocol.KDF import PBKDF2
+from Crypto.Random import get_random_bytes
+from base64 import b64encode, b64decode
+from Crypto.Cipher import AES
+from base64 import b64encode, b64decode
+from Crypto.Protocol.KDF import PBKDF2
+from Crypto.Hash import SHA256
+from Crypto.Random import get_random_bytes
 
 # Signal class for updating the GUI from a different thread
 class Signal(QObject):
     received = pyqtSignal(str)
 
+def get_key(password):
+    salt = get_random_bytes(16)  # Generate a secure random salt
+    key = PBKDF2(password, salt, dkLen=16, count=1000, hmac_hash_module=SHA256)
+    return key, salt
+
+def encrypt_message(plaintext, key):
+    cipher = AES.new(key, AES.MODE_EAX)
+    ciphertext, tag = cipher.encrypt_and_digest(plaintext.encode('utf-8'))
+    encrypted_msg = b64encode(cipher.nonce + tag + ciphertext).decode('utf-8')
+    return encrypted_msg
+
+def decrypt_message(encrypted_msg, key):
+    try:
+        data = b64decode(encrypted_msg)
+        nonce, tag, ciphertext = data[:16], data[16:32], data[32:]
+        cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
+        plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+        return plaintext.decode('utf-8')
+    except (ValueError, KeyError) as e:
+        return "[Decryption failed]"
+
 # Client class that handles sending and receiving messages
 class ChatClient:
     def __init__(self, signal, host='127.0.0.1', port=12345, username="Alice"):
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client_socket.connect((host, port))
+        
+        # Create SSL context
+        context = ssl.create_default_context()
+        context.load_verify_locations('/Users/nataliehill/cert.pem')  # Specify the correct path to your certificate
+
+        # Wrap the socket with SSL
+        self.secure_socket = context.wrap_socket(self.client_socket, server_hostname=host)
+        self.secure_socket.connect((host, port))
+
         self.signal = signal
         self.username = username
+        self.password = "secure_password"
+        self.key, self.salt = get_key(self.password)
         threading.Thread(target=self.receive_messages, daemon=True).start()
 
     def send_message(self, message):
-        # Append the username before sending the message
-        message_to_send = f"{self.username}: {message}"
+        # Encrypt the message before sending
+        encrypted_message = encrypt_message(f"{self.username}: {message}", self.key)
         try:
-            self.client_socket.send(message_to_send.encode('utf-8'))
+            self.secure_socket.send(encrypted_message.encode('utf-8'))
         except Exception as e:
             print(f"Error sending message: {e}")
 
     def receive_messages(self):
         while True:
             try:
-                message = self.client_socket.recv(1024).decode('utf-8')
+                encrypted_message = self.secure_socket.recv(1024).decode('utf-8')
+                message = decrypt_message(encrypted_message, self.key)
                 self.signal.received.emit(message)
             except Exception as e:
                 print(f"Error receiving messages: {e}")
-                self.client_socket.close()
+                self.secure_socket.close()
                 break
 
 # Main window class for the chat application
